@@ -22,7 +22,10 @@ async function setupVFS(mujoco: any) {
 
   // The scene includes the robot XML in the same directory.
   const robotUrl = './assets/g1/g1_29dof_rev_1_0.xml';
-  const robotText = await (await fetch(robotUrl)).text();
+  let robotText = await (await fetch(robotUrl)).text();
+  // The original XML lives next to a sibling meshes/ directory. In the VFS
+  // we place the XML and meshes both under /working/, so adjust meshdir.
+  robotText = robotText.replace(/meshdir="\.\.\/meshes\/g1\/"/g, 'meshdir="meshes/g1/"');
   mujoco.FS.writeFile('/working/g1_29dof_rev_1_0.xml', robotText);
 
   // Parse mesh file names from the robot XML.
