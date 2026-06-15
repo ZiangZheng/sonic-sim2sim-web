@@ -213,30 +213,39 @@ function buildMeshGeometry(model: any, meshId: number): THREE.BufferGeometry {
     vertexBuffer[v + 2] = -temp;
   }
 
-  const normalStart = model.mesh_normaladr[meshId] * 3;
-  const normalEnd =
-    (model.mesh_normaladr[meshId] + model.mesh_normalnum[meshId]) * 3;
-  const normalBuffer = new Float32Array(model.mesh_normal.subarray(normalStart, normalEnd));
-  for (let v = 0; v < normalBuffer.length; v += 3) {
-    const temp = normalBuffer[v + 1];
-    normalBuffer[v + 1] = normalBuffer[v + 2];
-    normalBuffer[v + 2] = -temp;
+  const normalAdr = model.mesh_normaladr[meshId];
+  const normalNum = model.mesh_normalnum[meshId];
+  const hasNormal = normalAdr >= 0 && normalNum > 0;
+  const normalBuffer = hasNormal
+    ? new Float32Array(model.mesh_normal.subarray(normalAdr * 3, (normalAdr + normalNum) * 3))
+    : new Float32Array(0);
+  if (hasNormal) {
+    for (let v = 0; v < normalBuffer.length; v += 3) {
+      const temp = normalBuffer[v + 1];
+      normalBuffer[v + 1] = normalBuffer[v + 2];
+      normalBuffer[v + 2] = -temp;
+    }
   }
 
-  const uvStart = model.mesh_texcoordadr[meshId] * 2;
-  const uvEnd =
-    (model.mesh_texcoordadr[meshId] + model.mesh_texcoordnum[meshId]) * 2;
-  const uvBuffer = new Float32Array(model.mesh_texcoord.subarray(uvStart, uvEnd));
+  const texCoordAdr = model.mesh_texcoordadr[meshId];
+  const texCoordNum = model.mesh_texcoordnum[meshId];
+  const hasUV = texCoordAdr >= 0 && texCoordNum > 0;
+  const uvBuffer = hasUV
+    ? new Float32Array(
+        model.mesh_texcoord.subarray(texCoordAdr * 2, (texCoordAdr + texCoordNum) * 2),
+      )
+    : new Float32Array(0);
 
   const faceStart = model.mesh_faceadr[meshId] * 3;
   const faceEnd = (model.mesh_faceadr[meshId] + model.mesh_facenum[meshId]) * 3;
   const faceToVertex = new Uint32Array(model.mesh_face.subarray(faceStart, faceEnd));
-  const faceToUV = new Uint32Array(
-    model.mesh_facetexcoord.subarray(faceStart, faceEnd),
-  );
-  const faceToNormal = new Uint32Array(
-    model.mesh_facenormal.subarray(faceStart, faceEnd),
-  );
+  const faceToUV = hasUV
+    ? new Uint32Array(model.mesh_facetexcoord.subarray(faceStart, faceEnd))
+    : new Uint32Array(0);
+  const faceToNormal =
+    normalNum > 0
+      ? new Uint32Array(model.mesh_facenormal.subarray(faceStart, faceEnd))
+      : new Uint32Array(0);
 
   const swizzledUV = new Float32Array((vertexBuffer.length / 3) * 2);
   const swizzledNormal = new Float32Array(vertexBuffer.length);
@@ -244,13 +253,17 @@ function buildMeshGeometry(model: any, meshId: number): THREE.BufferGeometry {
   for (let t = 0; t < faceToVertex.length / 3; t++) {
     for (let k = 0; k < 3; k++) {
       const vi = faceToVertex[t * 3 + k];
-      const uvi = faceToUV[t * 3 + k];
-      const nvi = faceToNormal[t * 3 + k];
-      swizzledUV[vi * 2 + 0] = uvBuffer[uvi * 2 + 0];
-      swizzledUV[vi * 2 + 1] = uvBuffer[uvi * 2 + 1];
-      swizzledNormal[vi * 3 + 0] = normalBuffer[nvi * 3 + 0];
-      swizzledNormal[vi * 3 + 1] = normalBuffer[nvi * 3 + 1];
-      swizzledNormal[vi * 3 + 2] = normalBuffer[nvi * 3 + 2];
+      if (hasUV) {
+        const uvi = faceToUV[t * 3 + k];
+        swizzledUV[vi * 2 + 0] = uvBuffer[uvi * 2 + 0];
+        swizzledUV[vi * 2 + 1] = uvBuffer[uvi * 2 + 1];
+      }
+      if (hasNormal) {
+        const nvi = faceToNormal[t * 3 + k];
+        swizzledNormal[vi * 3 + 0] = normalBuffer[nvi * 3 + 0];
+        swizzledNormal[vi * 3 + 1] = normalBuffer[nvi * 3 + 1];
+        swizzledNormal[vi * 3 + 2] = normalBuffer[nvi * 3 + 2];
+      }
     }
   }
 
