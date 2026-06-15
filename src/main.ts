@@ -17,12 +17,17 @@ const DEFAULT_MOTION_URL = './motions/squat_001.json';
 async function setupVFS(mujoco: any) {
   mujoco.FS.mkdir('/working');
 
-  const xmlText = await (await fetch(DEFAULT_XML_URL)).text();
-  mujoco.FS.writeFile(MUJOCO_SCENE_PATH, xmlText);
+  const sceneText = await (await fetch(DEFAULT_XML_URL)).text();
+  mujoco.FS.writeFile(MUJOCO_SCENE_PATH, sceneText);
 
-  // Parse mesh file names from the XML.
+  // The scene includes the robot XML in the same directory.
+  const robotUrl = './assets/g1/g1_29dof_rev_1_0.xml';
+  const robotText = await (await fetch(robotUrl)).text();
+  mujoco.FS.writeFile('/working/g1_29dof_rev_1_0.xml', robotText);
+
+  // Parse mesh file names from the robot XML.
   const parser = new DOMParser();
-  const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
+  const xmlDoc = parser.parseFromString(robotText, 'text/xml');
   const meshEls = Array.from(xmlDoc.querySelectorAll('mesh'));
   const meshFiles = meshEls.map((el) => el.getAttribute('file')).filter(Boolean) as string[];
 
