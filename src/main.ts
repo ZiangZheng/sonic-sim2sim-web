@@ -11,28 +11,76 @@ import { CameraWindow } from './cameras';
 import { RealTimePlot } from './plots';
 
 const MUJOCO_SCENE_PATH = '/working/scene.xml';
-const DEFAULT_XML_URL = './assets/g1/scene.xml';
 const DEFAULT_MOTION_URL = './motions/squat_001.json';
 
-async function setupVFS(mujoco: any) {
+type ModelId = 'sonic' | 'php';
+type PlayMode = 'kinematic' | 'sonic';
+
+interface ModelProfile {
+  id: ModelId;
+  label: string;
+  sceneUrl: string;
+  includeRobotXml: boolean;
+  defaultMotionUrl?: string;
+  initialJointPos?: number[];
+}
+
+const PHP_DEFAULT_JOINT_POS = [
+  0.162997201, -0.0361181423, -0.0214254409, 0.267154634, -0.174296871, 0.212671682,
+  0.282425106, -0.0584460497, -0.556104779, 0.126711249, -0.123827517, -0.190653816,
+  0.000492588617, -0.0195334535, 0.428676069,
+  -0.00628881808, 0.161155701, 0.236345276, 0.980316162, 0.15456377, 0.0774896815, 0.0205286704,
+  -0.128641531, -0.0847690701, -0.255017966, 1.09530210, -0.134532213, 0.0875737667, 0.0601755157,
+];
+
+const MODEL_PROFILES: Record<ModelId, ModelProfile> = {
+  sonic: {
+    id: 'sonic',
+    label: 'Sonic',
+    sceneUrl: './assets/g1/scene.xml',
+    includeRobotXml: true,
+    defaultMotionUrl: DEFAULT_MOTION_URL,
+  },
+  php: {
+    id: 'php',
+    label: 'PHP',
+    sceneUrl: './assets/php/g1_with_terrain.xml',
+    includeRobotXml: false,
+    initialJointPos: PHP_DEFAULT_JOINT_POS,
+  },
+};
+
+function getInitialModelId(): ModelId {
+  const model = new URLSearchParams(window.location.search).get('model')?.toLowerCase();
+  return model === 'php' ? 'php' : 'sonic';
+}
+
+async function setupVFS(mujoco: any, profile: ModelProfile) {
   mujoco.FS.mkdir('/working');
 
-  const sceneText = await (await fetch(DEFAULT_XML_URL)).text();
+  const sceneText = await (await fetch(profile.sceneUrl)).text();
   mujoco.FS.writeFile(MUJOCO_SCENE_PATH, sceneText);
 
-  // The scene includes the robot XML in the same directory.
-  const robotUrl = './assets/g1/g1_29dof_rev_1_0.xml';
-  let robotText = await (await fetch(robotUrl)).text();
-  // The original XML lives next to a sibling meshes/ directory. In the VFS
-  // we place the XML and meshes both under /working/, so adjust meshdir.
-  robotText = robotText.replace(/meshdir="\.\.\/meshes\/g1\/"/g, 'meshdir="meshes/g1/"');
-  mujoco.FS.writeFile('/working/g1_29dof_rev_1_0.xml', robotText);
+  const xmlSources = [sceneText];
+  if (profile.includeRobotXml) {
+    // The Sonic scene includes the robot XML in the same directory.
+    const robotUrl = './assets/g1/g1_29dof_rev_1_0.xml';
+    let robotText = await (await fetch(robotUrl)).text();
+    // The original XML lives next to a sibling meshes/ directory. In the VFS
+    // we place the XML and meshes both under /working/, so adjust meshdir.
+    robotText = robotText.replace(/meshdir="\.\.\/meshes\/g1\/"/g, 'meshdir="meshes/g1/"');
+    mujoco.FS.writeFile('/working/g1_29dof_rev_1_0.xml', robotText);
+    xmlSources.push(robotText);
+  }
 
   // Parse mesh file names from the robot XML.
   const parser = new DOMParser();
-  const xmlDoc = parser.parseFromString(robotText, 'text/xml');
-  const meshEls = Array.from(xmlDoc.querySelectorAll('mesh'));
-  const meshFiles = meshEls.map((el) => el.getAttribute('file')).filter(Boolean) as string[];
+  const meshFiles = Array.from(new Set(xmlSources.flatMap((xml) => {
+    const xmlDoc = parser.parseFromString(xml, 'text/xml');
+    return Array.from(xmlDoc.querySelectorAll('mesh'))
+      .map((el) => el.getAttribute('file'))
+      .filter(Boolean) as string[];
+  })));
 
   const meshDir = '/working/meshes/g1';
   mujoco.FS.mkdir('/working/meshes');
@@ -54,6 +102,8 @@ async function setupVFS(mujoco: any) {
 
 async function init() {
   const app = document.getElementById('app')!;
+  const activeModelId = getInitialModelId();
+  const activeProfile = MODEL_PROFILES[activeModelId];
 
   // Canvas container
   const canvasContainer = document.createElement('div');
@@ -62,7 +112,7 @@ async function init() {
 
   // Load MuJoCo WASM.
   const mujoco = await loadMujoco({ locateFile: (path: string) => (path === 'mujoco.wasm' ? wasmUrl : path) });
-  await setupVFS(mujoco);
+  await setupVFS(mujoco, activeProfile);
 
   const mjScene = await loadMuJoCoScene(mujoco, MUJOCO_SCENE_PATH);
 
@@ -131,8 +181,8 @@ async function init() {
 
   // State.
   let motion: MotionClip | null = null;
-  let isPlaying = true;
-  let playMode: 'kinematic' | 'sim2sim' = 'kinematic';
+  let isPlaying = activeModelId === 'sonic';
+  let playMode: PlayMode = 'kinematic';
   let playSpeed = 1.0;
   let currentTime = 0;
   let simTime = 0;
@@ -141,8 +191,15 @@ async function init() {
 
   // Build UI.
   const ui = buildUI({
+    activeModelId,
+    initialPlaying: isPlaying,
     onPlayPause: () => {
       isPlaying = !isPlaying;
+    },
+    onModelChange: (modelId) => {
+      const params = new URLSearchParams(window.location.search);
+      params.set('model', modelId);
+      window.location.search = params.toString();
     },
     onReset: () => {
       currentTime = 0;
@@ -152,6 +209,8 @@ async function init() {
         setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
         mujoco.mj_forward(mjScene.model, mjScene.data);
         updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
+      } else {
+        resetModelState(mjScene, mujoco, activeProfile);
       }
     },
     onModeChange: (mode) => {
@@ -190,28 +249,31 @@ async function init() {
   const depthWindow = new CameraWindow(ui.depthContainer, true);
 
   // Plots.
-  const jointErrorPlot = new RealTimePlot(
+  const jointErrorPlot = ui.jointErrorCanvas ? new RealTimePlot(
     ui.jointErrorCanvas,
     'Joint Tracking Error (rad)',
     ['left_hip', 'right_hip', 'left_knee', 'right_knee'],
     ['#3870e8', '#00bcd4', '#f59e0b', '#ef4444'],
-  );
-  const rootHeightPlot = new RealTimePlot(
+  ) : null;
+  const rootHeightPlot = ui.rootHeightCanvas ? new RealTimePlot(
     ui.rootHeightCanvas,
     'Root Height (m)',
     ['ref', 'actual'],
     ['#00bcd4', '#3870e8'],
-  );
+  ) : null;
 
-  // Load default motion.
-  loadMotionFromURL(DEFAULT_MOTION_URL).then((m) => {
-    motion = m;
-    updateMotionUI(motion);
-    const ref = sampleMotion(motion, 0);
-    setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
-    mujoco.mj_forward(mjScene.model, mjScene.data);
-    updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
-  });
+  if (activeProfile.defaultMotionUrl) {
+    loadMotionFromURL(activeProfile.defaultMotionUrl).then((m) => {
+      motion = m;
+      updateMotionUI(motion);
+      const ref = sampleMotion(motion, 0);
+      setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
+      mujoco.mj_forward(mjScene.model, mjScene.data);
+      updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
+    });
+  } else {
+    resetModelState(mjScene, mujoco, activeProfile);
+  }
 
   function updateMotionUI(m: MotionClip) {
     ui.durationEl.textContent = `${m.duration.toFixed(2)}s`;
@@ -242,7 +304,7 @@ async function init() {
         setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
         mujoco.mj_forward(mjScene.model, mjScene.data);
       } else {
-        // Sim2Sim: step physics at the model timestep.
+        // Sonic: track the motion reference through the physics model.
         const step = mjScene.model.opt.timestep;
         const targetSimTime = simTime + dt * playSpeed;
         let steps = 0;
@@ -262,6 +324,15 @@ async function init() {
 
       ui.timeSlider.value = String(currentTime);
       ui.timeDisplay.textContent = `${currentTime.toFixed(2)}s`;
+    } else if (!motion && isPlaying) {
+      const step = mjScene.model.opt.timestep;
+      const targetSimTime = simTime + dt * playSpeed;
+      let steps = 0;
+      while (simTime < targetSimTime && steps < 20) {
+        mujoco.mj_step(mjScene.model, mjScene.data);
+        simTime += step;
+        steps++;
+      }
     }
 
     updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
@@ -279,8 +350,8 @@ async function init() {
         Math.abs(ref.qpos[7 + 3] - qpos[7 + 3]),
         Math.abs(ref.qpos[7 + 9] - qpos[7 + 9]),
       ];
-      jointErrorPlot.push(errors, currentTime.toFixed(1));
-      rootHeightPlot.push([ref.qpos[2], qpos[2]], currentTime.toFixed(1));
+      jointErrorPlot?.push(errors, currentTime.toFixed(1));
+      rootHeightPlot?.push([ref.qpos[2], qpos[2]], currentTime.toFixed(1));
     }
 
     controls.update();
@@ -300,9 +371,12 @@ async function init() {
 }
 
 interface UIControls {
+  activeModelId: ModelId;
+  initialPlaying: boolean;
   onPlayPause: () => void;
   onReset: () => void;
-  onModeChange: (mode: 'kinematic' | 'sim2sim') => void;
+  onModelChange: (modelId: ModelId) => void;
+  onModeChange: (mode: PlayMode) => void;
   onSpeedChange: (speed: number) => void;
   onFile: (file: File) => void;
   onKpChange: (kp: number) => void;
@@ -311,6 +385,7 @@ interface UIControls {
 }
 
 function buildUI(c: UIControls) {
+  const isSonic = c.activeModelId === 'sonic';
   const root = document.createElement('div');
   root.className = 'pointer-events-none absolute inset-0 z-10 flex flex-col justify-between p-4';
 
@@ -318,7 +393,7 @@ function buildUI(c: UIControls) {
   const header = document.createElement('div');
   header.className = 'pointer-events-auto glass-panel px-5 py-3 inline-flex items-center gap-3 self-start';
   header.innerHTML = `
-    <div class="text-lg font-bold tracking-tight">Sonic <span class="text-cyan-400">Sim2Sim</span> Visualizer</div>
+    <div class="text-lg font-bold tracking-tight"><span class="text-cyan-400">${MODEL_PROFILES[c.activeModelId].label}</span> Visualizer</div>
     <div class="text-xs text-slate-400 hidden sm:block">Unitree G1 · MuJoCo WASM</div>
   `;
   root.appendChild(header);
@@ -334,8 +409,8 @@ function buildUI(c: UIControls) {
   const row1 = document.createElement('div');
   row1.className = 'flex items-center gap-2';
   const playBtn = document.createElement('button');
-  playBtn.className = 'glass-button active';
-  playBtn.textContent = 'Pause';
+  playBtn.className = c.initialPlaying ? 'glass-button active' : 'glass-button';
+  playBtn.textContent = c.initialPlaying ? 'Pause' : 'Play';
   playBtn.onclick = () => {
     c.onPlayPause();
     playBtn.textContent = playBtn.textContent === 'Pause' ? 'Play' : 'Pause';
@@ -347,6 +422,19 @@ function buildUI(c: UIControls) {
   resetBtn.onclick = c.onReset;
   row1.append(playBtn, resetBtn);
 
+  const modelRow = document.createElement('div');
+  modelRow.className = 'flex items-center gap-2 text-sm';
+  modelRow.innerHTML = '<span class="text-slate-300 w-14">Model</span>';
+  const modelSelect = document.createElement('select');
+  modelSelect.className = 'glass-input flex-1';
+  modelSelect.innerHTML = `
+    <option value="sonic">Sonic</option>
+    <option value="php">PHP</option>
+  `;
+  modelSelect.value = c.activeModelId;
+  modelSelect.onchange = () => c.onModelChange(modelSelect.value as ModelId);
+  modelRow.append(modelSelect);
+
   const modeRow = document.createElement('div');
   modeRow.className = 'flex gap-2';
   const kinBtn = document.createElement('button');
@@ -354,14 +442,14 @@ function buildUI(c: UIControls) {
   kinBtn.textContent = 'Kinematic';
   const simBtn = document.createElement('button');
   simBtn.className = 'glass-button flex-1';
-  simBtn.textContent = 'Sim2Sim';
+  simBtn.textContent = 'Sonic';
   kinBtn.onclick = () => {
     c.onModeChange('kinematic');
     kinBtn.classList.add('active');
     simBtn.classList.remove('active');
   };
   simBtn.onclick = () => {
-    c.onModeChange('sim2sim');
+    c.onModeChange('sonic');
     simBtn.classList.add('active');
     kinBtn.classList.remove('active');
   };
@@ -422,13 +510,16 @@ function buildUI(c: UIControls) {
   uploadBtn.onclick = () => fileInput.click();
   fileRow.append(fileInput, uploadBtn);
 
-  playbackPanel.append(row1, modeRow, speedRow, timeRow, fileRow);
+  playbackPanel.append(row1, modelRow);
+  if (isSonic) playbackPanel.append(modeRow);
+  playbackPanel.append(speedRow);
+  if (isSonic) playbackPanel.append(timeRow, fileRow);
 
   // Options panel.
   const optionsPanel = document.createElement('div');
   optionsPanel.className = 'glass-panel p-4 flex flex-col gap-3 min-w-[220px]';
   optionsPanel.innerHTML = `
-    <div class="text-sm font-semibold text-slate-200">PD Gains (Sim2Sim)</div>
+    <div class="text-sm font-semibold text-slate-200">Sonic PD Gains</div>
   `;
   const kpRow = createNumberRow('Kp', DEFAULT_CONTROLLER_OPTIONS.kp, 0, 400, 10, c.onKpChange);
   const kdRow = createNumberRow('Kd', DEFAULT_CONTROLLER_OPTIONS.kd, 0, 40, 1, c.onKdChange);
@@ -452,19 +543,34 @@ function buildUI(c: UIControls) {
     <div class="plot-container"><canvas id="root-height-canvas"></canvas></div>
   `;
 
-  bottom.append(playbackPanel, optionsPanel, cameraPanel, plotsPanel);
+  bottom.append(playbackPanel);
+  if (isSonic) bottom.append(optionsPanel);
+  bottom.append(cameraPanel);
+  if (isSonic) bottom.append(plotsPanel);
   root.appendChild(bottom);
 
   return {
     root,
     rgbContainer: cameraPanel.querySelector('#rgb-container') as HTMLDivElement,
     depthContainer: cameraPanel.querySelector('#depth-container') as HTMLDivElement,
-    jointErrorCanvas: plotsPanel.querySelector('#joint-error-canvas') as HTMLCanvasElement,
-    rootHeightCanvas: plotsPanel.querySelector('#root-height-canvas') as HTMLCanvasElement,
+    jointErrorCanvas: plotsPanel.querySelector('#joint-error-canvas') as HTMLCanvasElement | null,
+    rootHeightCanvas: plotsPanel.querySelector('#root-height-canvas') as HTMLCanvasElement | null,
     timeDisplay,
     timeSlider,
     durationEl,
   };
+}
+
+function resetModelState(scene: MuJoCoScene, mujoco: any, profile: ModelProfile) {
+  mujoco.mj_resetData(scene.model, scene.data);
+  if (profile.initialJointPos) {
+    for (let i = 0; i < profile.initialJointPos.length; i++) {
+      scene.data.qpos[7 + i] = profile.initialJointPos[i];
+      scene.data.qvel[6 + i] = 0;
+    }
+  }
+  mujoco.mj_forward(scene.model, scene.data);
+  updateSceneTransforms(scene.model, scene.data, scene.bodies);
 }
 
 function createNumberRow(

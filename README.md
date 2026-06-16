@@ -1,17 +1,18 @@
-# Sonic Sim2Sim WASM Visualizer
+# Sonic / PHP WASM Visualizer
 
-A browser-based visualizer for the Sonic humanoid sim2sim pipeline, built with the official DeepMind [`@mujoco/mujoco`](https://www.npmjs.com/package/@mujoco/mujoco) WASM bindings.
+A browser-based visualizer for Sonic motion-reference tracking and the PHP G1 scene, built with the official DeepMind [`@mujoco/mujoco`](https://www.npmjs.com/package/@mujoco/mujoco) WASM bindings.
 
-It loads a **Unitree G1** robot model, plays motion references, and visualizes both the reference and physics-tracked states in real time.
+It lets you choose between **Sonic** and **PHP** models. Sonic plays motion references and can track them through physics; PHP loads the parkour terrain scene as a separate model entry.
 
 ## Features
 
 - **Official MuJoCo WASM** — single-threaded `@mujoco/mujoco` physics in the browser.
+- **Model selection** — choose Sonic or PHP from the control panel.
 - **Unitree G1** — 29-DOF robot model with STL meshes.
 - **Motion playback** — load built-in or user-uploaded motion JSONs.
-- **Two playback modes**
+- **Sonic playback modes**
   - *Kinematic*: directly set `qpos` from the reference.
-  - *Sim2Sim*: run MuJoCo physics with a PD controller tracking the reference.
+  - *Sonic*: run MuJoCo physics with a PD controller tracking the reference.
 - **First-person cameras** — RGB + depth windows attached to the robot head.
 - **Real-time plots** — joint tracking error and root height.
 - **Fancy glass UI** — dark theme, options panel, playback speed, PD gains.
@@ -47,7 +48,8 @@ The input directory must contain `joint_pos.csv`, `joint_vel.csv`, `body_pos.csv
 ## Project structure
 
 ```
-public/assets/g1/        # G1 MuJoCo XML + STL meshes
+public/assets/g1/        # Shared G1 MuJoCo XML + STL meshes
+public/assets/php/       # PHP terrain scene
 public/motions/          # Sample converted motions
 scripts/                 # Python conversion utilities
 src/
