@@ -11,7 +11,7 @@ import { CameraWindow } from './cameras';
 import { RealTimePlot } from './plots';
 
 const MUJOCO_SCENE_PATH = '/working/scene.xml';
-const DEFAULT_MOTION_URL = './motions/squat_001.json';
+const DEFAULT_MOTION_URL = './motions/stand_sonic.json';
 
 type ModelId = 'sonic' | 'php';
 type PlayMode = 'kinematic' | 'sonic';
