@@ -9,6 +9,7 @@ import { loadMotionFromURL, loadMotionFromFile, sampleMotion, type MotionClip } 
 import { applyPDControl, setStateKinematic, DEFAULT_CONTROLLER_OPTIONS, type ControllerOptions } from './controller';
 import { CameraWindow } from './cameras';
 import { RealTimePlot } from './plots';
+import { PolicyController } from './phpPolicyController.js';
 
 const MUJOCO_SCENE_PATH = '/working/scene.xml';
 const DEFAULT_MOTION_URL = './motions/stand_sonic.json';
@@ -23,6 +24,11 @@ interface ModelProfile {
   includeRobotXml: boolean;
   defaultMotionUrl?: string;
   initialJointPos?: number[];
+  policy?: {
+    modelPath: string;
+    depthModelPath: string | null;
+    controlDt: number;
+  };
 }
 
 const PHP_DEFAULT_JOINT_POS = [
@@ -47,6 +53,11 @@ const MODEL_PROFILES: Record<ModelId, ModelProfile> = {
     sceneUrl: './assets/php/g1_with_terrain.xml',
     includeRobotXml: false,
     initialJointPos: PHP_DEFAULT_JOINT_POS,
+    policy: {
+      modelPath: './policies/php/student.onnx',
+      depthModelPath: null,
+      controlDt: 0.02,
+    },
   },
 };
 
@@ -188,6 +199,11 @@ async function init() {
   let simTime = 0;
   let lastFrameTime = performance.now();
   let controllerOptions: ControllerOptions = { ...DEFAULT_CONTROLLER_OPTIONS };
+  let phpPolicy: any = null;
+  let phpPolicyReady = false;
+  let phpPolicyEnabled = activeModelId === 'php';
+  let phpPolicyStepCounter = 0;
+  let phpPolicyDecimation = 1;
 
   // Build UI.
   const ui = buildUI({
@@ -204,6 +220,7 @@ async function init() {
     onReset: () => {
       currentTime = 0;
       simTime = 0;
+      phpPolicyStepCounter = 0;
       if (motion) {
         const ref = sampleMotion(motion, 0);
         setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
@@ -211,6 +228,7 @@ async function init() {
         updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
       } else {
         resetModelState(mjScene, mujoco, activeProfile);
+        phpPolicy?.reset?.();
       }
     },
     onModeChange: (mode) => {
@@ -231,6 +249,13 @@ async function init() {
     },
     onKpChange: (kp) => (controllerOptions.kp = kp),
     onKdChange: (kd) => (controllerOptions.kd = kd),
+    onPhpPolicyChange: (enabled) => (phpPolicyEnabled = enabled),
+    onPhpAutoForwardChange: (enabled) => {
+      if (phpPolicy) phpPolicy.autoForward = enabled;
+    },
+    onPhpHighSpeedChange: (enabled) => {
+      if (phpPolicy) phpPolicy.highSpeedMode = enabled;
+    },
     onSeek: (t) => {
       currentTime = t;
       simTime = t;
@@ -247,6 +272,19 @@ async function init() {
   // Camera windows.
   const rgbWindow = new CameraWindow(ui.rgbContainer, false);
   const depthWindow = new CameraWindow(ui.depthContainer, true);
+
+  if (activeProfile.policy) {
+    ui.policyStatusEl!.textContent = 'Loading policy...';
+    phpPolicy = new PolicyController(mujoco, activeProfile.policy);
+    phpPolicy.init(mjScene.model).then(() => {
+      phpPolicyReady = true;
+      phpPolicyDecimation = Math.max(1, Math.round(activeProfile.policy!.controlDt / mjScene.model.opt.timestep));
+      ui.policyStatusEl!.textContent = 'Policy ready';
+    }).catch((err: unknown) => {
+      console.error('Failed to initialize PHP policy:', err);
+      ui.policyStatusEl!.textContent = 'Policy failed';
+    });
+  }
 
   // Plots.
   const jointErrorPlot = ui.jointErrorCanvas ? new RealTimePlot(
@@ -329,6 +367,17 @@ async function init() {
       const targetSimTime = simTime + dt * playSpeed;
       let steps = 0;
       while (simTime < targetSimTime && steps < 20) {
+        if (activeProfile.policy) {
+          if (!phpPolicyReady || !phpPolicyEnabled) break;
+          if (phpPolicyStepCounter % phpPolicyDecimation === 0) {
+            phpPolicy._updateCommandState?.();
+            void phpPolicy.requestAction(mjScene.model, mjScene.data).catch((err: unknown) => {
+              console.error('PHP policy inference error:', err);
+            });
+          }
+          phpPolicy.applyControl(mjScene.model, mjScene.data);
+          phpPolicyStepCounter++;
+        }
         mujoco.mj_step(mjScene.model, mjScene.data);
         simTime += step;
         steps++;
@@ -381,6 +430,9 @@ interface UIControls {
   onFile: (file: File) => void;
   onKpChange: (kp: number) => void;
   onKdChange: (kd: number) => void;
+  onPhpPolicyChange: (enabled: boolean) => void;
+  onPhpAutoForwardChange: (enabled: boolean) => void;
+  onPhpHighSpeedChange: (enabled: boolean) => void;
   onSeek: (time: number) => void;
 }
 
@@ -525,6 +577,17 @@ function buildUI(c: UIControls) {
   const kdRow = createNumberRow('Kd', DEFAULT_CONTROLLER_OPTIONS.kd, 0, 40, 1, c.onKdChange);
   optionsPanel.append(kpRow, kdRow);
 
+  const phpOptionsPanel = document.createElement('div');
+  phpOptionsPanel.className = 'glass-panel p-4 flex flex-col gap-3 min-w-[220px]';
+  phpOptionsPanel.innerHTML = `
+    <div class="text-sm font-semibold text-slate-200">PHP Policy</div>
+    <div class="text-xs text-slate-400" id="policy-status">Policy disabled</div>
+  `;
+  const policyRow = createCheckboxRow('Enabled', true, c.onPhpPolicyChange);
+  const autoForwardRow = createCheckboxRow('Auto forward', false, c.onPhpAutoForwardChange);
+  const highSpeedRow = createCheckboxRow('High speed', true, c.onPhpHighSpeedChange);
+  phpOptionsPanel.append(policyRow, autoForwardRow, highSpeedRow);
+
   // Camera windows panel.
   const cameraPanel = document.createElement('div');
   cameraPanel.className = 'glass-panel p-3 flex flex-col gap-2';
@@ -545,6 +608,7 @@ function buildUI(c: UIControls) {
 
   bottom.append(playbackPanel);
   if (isSonic) bottom.append(optionsPanel);
+  if (!isSonic) bottom.append(phpOptionsPanel);
   bottom.append(cameraPanel);
   if (isSonic) bottom.append(plotsPanel);
   root.appendChild(bottom);
@@ -555,6 +619,7 @@ function buildUI(c: UIControls) {
     depthContainer: cameraPanel.querySelector('#depth-container') as HTMLDivElement,
     jointErrorCanvas: plotsPanel.querySelector('#joint-error-canvas') as HTMLCanvasElement | null,
     rootHeightCanvas: plotsPanel.querySelector('#root-height-canvas') as HTMLCanvasElement | null,
+    policyStatusEl: phpOptionsPanel.querySelector('#policy-status') as HTMLDivElement | null,
     timeDisplay,
     timeSlider,
     durationEl,
@@ -587,6 +652,24 @@ function createNumberRow(
     <input type="number" class="glass-input w-16 text-right" min="${min}" max="${max}" step="${step}" value="${initial}">`;
   const input = row.querySelector('input')!;
   input.onchange = () => onChange(parseFloat(input.value));
+  return row;
+}
+
+function createCheckboxRow(
+  label: string,
+  initial: boolean,
+  onChange: (v: boolean) => void,
+) {
+  const row = document.createElement('label');
+  row.className = 'flex items-center justify-between gap-3 text-sm text-slate-300';
+  const span = document.createElement('span');
+  span.textContent = label;
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = initial;
+  input.className = 'h-4 w-4 accent-blue-500';
+  input.onchange = () => onChange(input.checked);
+  row.append(span, input);
   return row;
 }
 

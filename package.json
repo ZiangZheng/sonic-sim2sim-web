@@ -17,6 +17,7 @@
     "@tailwindcss/vite": "^4.3.1",
     "@types/three": "^0.184.1",
     "chart.js": "^4.5.1",
+    "onnxruntime-web": "^1.26.0",
     "tailwindcss": "^4.3.1",
     "three": "^0.184.0"
   }
