@@ -5,16 +5,16 @@ type MujocoModule = Awaited<ReturnType<typeof loadMujoco>>;
 export interface ControllerOptions {
   kp: number;
   kd: number;
+  maxTorque: number;
 }
 
 export const DEFAULT_CONTROLLER_OPTIONS: ControllerOptions = {
-  kp: 150,
-  kd: 8,
+  kp: 120,
+  kd: 12,
+  maxTorque: 180,
 };
 
-// Cache the mapping from joint index to actuator ctrl index so we don't
-// rebuild it every physics step.
-let jointToActuatorCache: Map<number, number> | null = null;
+const jointToActuatorCache = new WeakMap<object, Map<number, number>>();
 
 function buildJointToActuatorMap(mujoco: MujocoModule, model: any): Map<number, number> {
   const map = new Map<number, number>();
@@ -35,8 +35,10 @@ export function applyPDControl(
   qvelRef: Float32Array,
   options: ControllerOptions,
 ): void {
-  if (!jointToActuatorCache || jointToActuatorCache.size === 0) {
-    jointToActuatorCache = buildJointToActuatorMap(mujoco, model);
+  let jointToActuator = jointToActuatorCache.get(model);
+  if (!jointToActuator) {
+    jointToActuator = buildJointToActuatorMap(mujoco, model);
+    jointToActuatorCache.set(model, jointToActuator);
   }
 
   // Zero out any previously applied controls / forces.
@@ -57,9 +59,9 @@ export function applyPDControl(
     const errVel = qvelRef[dofAdr] - data.qvel[dofAdr];
     const torque = options.kp * errPos + options.kd * errVel;
 
-    const actIdx = jointToActuatorCache.get(j);
+    const actIdx = jointToActuator.get(j);
     if (actIdx !== undefined) {
-      data.ctrl[actIdx] = torque;
+      data.ctrl[actIdx] = clampActuatorControl(model, actIdx, torque, options.maxTorque);
     } else {
       // Fallback if no actuator is defined for this joint.
       data.qfrc_applied[dofAdr] = torque;
@@ -67,12 +69,41 @@ export function applyPDControl(
   }
 }
 
+function clampActuatorControl(
+  model: any,
+  actuatorIndex: number,
+  value: number,
+  fallbackLimit: number,
+): number {
+  const limited = model.actuator_ctrllimited?.[actuatorIndex] ?? 0;
+  const range = model.actuator_ctrlrange;
+  if (!limited || !range || range.length < (actuatorIndex + 1) * 2) {
+    if (Number.isFinite(fallbackLimit) && fallbackLimit > 0) {
+      return Math.min(Math.max(value, -fallbackLimit), fallbackLimit);
+    }
+    return value;
+  }
+
+  const min = range[actuatorIndex * 2];
+  const max = range[(actuatorIndex * 2) + 1];
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+    return value;
+  }
+  return Math.min(Math.max(value, min), max);
+}
+
 export function setStateKinematic(
   model: any,
   data: any,
   qposRef: Float32Array,
+  qvelRef?: Float32Array,
 ): void {
-  for (let i = 0; i < model.nq; i++) {
+  for (let i = 0; i < model.nq && i < qposRef.length; i++) {
     data.qpos[i] = qposRef[i];
+  }
+  if (qvelRef) {
+    for (let i = 0; i < model.nv && i < qvelRef.length; i++) {
+      data.qvel[i] = qvelRef[i];
+    }
   }
 }

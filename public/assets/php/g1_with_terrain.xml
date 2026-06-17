@@ -125,7 +125,9 @@
               file="right_wrist_roll_link.STL"/>
         <mesh name="right_wrist_pitch_link"
               file="right_wrist_pitch_link.STL"/>
-        <mesh name="right_wrist_yaw_link" file="right_wrist_yaw_link.STL"/>    </asset>
+        <mesh name="right_wrist_yaw_link" file="right_wrist_yaw_link.STL"/>
+        <mesh name="half_sphere" file="half_sphere.obj"/>
+    </asset>
 
     <worldbody>
         <body name="pelvis" pos="0 0 0.793" childclass="g1">
@@ -295,9 +297,9 @@
                                                               mass="0.254576" diaginertia="0.000646113 0.000559993 0.000147566"/>
                                                     <joint name="left_wrist_yaw_joint" class="wrist_yaw"/>
                                                     <geom class="visual" mesh="left_wrist_yaw_link"/>
-                                                    <geom type="sphere" pos="0.029 0.003 0" size="0.055" class="visual"/>
+                                                    <geom pos="0.029 0.003 0" quat="0.707106 0 0.707106 0" class="visual" mesh="half_sphere"/>
                                                     <site name="left_palm" pos="0.08 0 0" size="0.01"/>
-                                                    <geom type="sphere" pos="0.029 0.003 0" size="0.055" name="left_hand_collision" class="collision"/>
+                                                    <geom type="mesh" pos="0.029 0.003 0" quat="0.707106 0 0.707106 0" name="left_hand_collision" class="collision" mesh="half_sphere"/>
                                                 </body>
                                             </body>
                                         </body>
@@ -345,9 +347,9 @@
                                                               mass="0.254576" diaginertia="0.000646113 0.000559993 0.000147566"/>
                                                     <joint name="right_wrist_yaw_joint" class="wrist_yaw"/>
                                                     <geom class="visual" mesh="right_wrist_yaw_link"/>
-                                                    <geom type="sphere" pos="0.029 -0.003 0" size="0.055" class="visual"/>
+                                                    <geom pos="0.029 -0.003 0" quat="0.707106 0 0.707106 0" class="visual" mesh="half_sphere"/>
                                                     <site name="right_palm" pos="0.08 0 0" size="0.01"/>
-                                                    <geom type="sphere" pos="0.029 -0.003 0" size="0.055" name="right_hand_collision" class="collision"/>
+                                                    <geom type="mesh" pos="0.029 -0.003 0" quat="0.707106 0 0.707106 0" name="right_hand_collision" class="collision" mesh="half_sphere"/>
                                                 </body>
                                             </body>
                                         </body>

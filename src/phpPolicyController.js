@@ -422,6 +422,19 @@ export class PolicyController {
     this._updateCommandState();
   }
 
+  setButtonPressed(key, pressed) {
+    if (!key || typeof key !== 'string') {
+      return;
+    }
+    const normalized = key.toLowerCase();
+    if (pressed) {
+      this.pressedKeys.add(normalized);
+    } else {
+      this.pressedKeys.delete(normalized);
+    }
+    this._updateCommandState();
+  }
+
   async _initOrt() {
     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
     ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 1);

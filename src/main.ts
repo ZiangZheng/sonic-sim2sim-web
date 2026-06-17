@@ -21,7 +21,7 @@ interface ModelProfile {
   id: ModelId;
   label: string;
   sceneUrl: string;
-  includeRobotXml: boolean;
+  meshBaseUrl: string;
   defaultMotionUrl?: string;
   initialJointPos?: number[];
   policy?: {
@@ -44,18 +44,18 @@ const MODEL_PROFILES: Record<ModelId, ModelProfile> = {
     id: 'sonic',
     label: 'Sonic',
     sceneUrl: './assets/g1/scene.xml',
-    includeRobotXml: true,
+    meshBaseUrl: './assets/g1/meshes/g1/',
     defaultMotionUrl: DEFAULT_MOTION_URL,
   },
   php: {
     id: 'php',
     label: 'PHP',
     sceneUrl: './assets/php/g1_with_terrain.xml',
-    includeRobotXml: false,
+    meshBaseUrl: './assets/g1/meshes/g1/',
     initialJointPos: PHP_DEFAULT_JOINT_POS,
     policy: {
       modelPath: './policies/php/student.onnx',
-      depthModelPath: null,
+      depthModelPath: './policies/php/depth_backbone.onnx',
       controlDt: 0.02,
     },
   },
@@ -67,25 +67,40 @@ function getInitialModelId(): ModelId {
 }
 
 async function setupVFS(mujoco: any, profile: ModelProfile) {
-  mujoco.FS.mkdir('/working');
+  mkdirp(mujoco, '/working');
+  mkdirp(mujoco, '/working/meshes/g1');
 
-  const sceneText = await (await fetch(profile.sceneUrl)).text();
-  mujoco.FS.writeFile(MUJOCO_SCENE_PATH, sceneText);
+  const parser = new DOMParser();
+  const xmlSources: string[] = [];
+  const loadedXml = new Set<string>();
 
-  const xmlSources = [sceneText];
-  if (profile.includeRobotXml) {
-    // The Sonic scene includes the robot XML in the same directory.
-    const robotUrl = './assets/g1/g1_29dof_rev_1_0.xml';
-    let robotText = await (await fetch(robotUrl)).text();
-    // The original XML lives next to a sibling meshes/ directory. In the VFS
-    // we place the XML and meshes both under /working/, so adjust meshdir.
-    robotText = robotText.replace(/meshdir="\.\.\/meshes\/g1\/"/g, 'meshdir="meshes/g1/"');
-    mujoco.FS.writeFile('/working/g1_29dof_rev_1_0.xml', robotText);
-    xmlSources.push(robotText);
+  async function loadXml(url: string, vfsPath: string) {
+    if (loadedXml.has(vfsPath)) return;
+    loadedXml.add(vfsPath);
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch MuJoCo XML: ${url} (${res.status} ${res.statusText})`);
+    }
+
+    const text = normalizeMuJoCoXml(await res.text());
+    mujoco.FS.writeFile(vfsPath, text);
+    xmlSources.push(text);
+
+    const xmlDoc = parser.parseFromString(text, 'text/xml');
+    const includes = Array.from(xmlDoc.querySelectorAll('include[file]'))
+      .map((el) => el.getAttribute('file'))
+      .filter(Boolean) as string[];
+
+    await Promise.all(includes.map((file) => {
+      const childUrl = new URL(file, url).toString();
+      const childPath = `${dirname(vfsPath)}/${basename(file)}`;
+      return loadXml(childUrl, childPath);
+    }));
   }
 
-  // Parse mesh file names from the robot XML.
-  const parser = new DOMParser();
+  await loadXml(new URL(profile.sceneUrl, window.location.href).toString(), MUJOCO_SCENE_PATH);
+
   const meshFiles = Array.from(new Set(xmlSources.flatMap((xml) => {
     const xmlDoc = parser.parseFromString(xml, 'text/xml');
     return Array.from(xmlDoc.querySelectorAll('mesh'))
@@ -93,22 +108,81 @@ async function setupVFS(mujoco: any, profile: ModelProfile) {
       .filter(Boolean) as string[];
   })));
 
-  const meshDir = '/working/meshes/g1';
-  mujoco.FS.mkdir('/working/meshes');
-  mujoco.FS.mkdir(meshDir);
+  const meshBaseUrl = new URL(profile.meshBaseUrl, window.location.href);
+  const missingMeshes: string[] = [];
+  await Promise.all(meshFiles.map(async (file) => {
+    const url = new URL(file, meshBaseUrl).toString();
+    const res = await fetch(url);
+    if (!res.ok) {
+      missingMeshes.push(`${file} (${res.status})`);
+      return;
+    }
+    const buffer = await res.arrayBuffer();
+    const vfsPath = `/working/meshes/g1/${file}`;
+    mkdirp(mujoco, dirname(vfsPath));
+    mujoco.FS.writeFile(vfsPath, new Uint8Array(buffer));
+  }));
 
-  await Promise.all(
-    meshFiles.map(async (file) => {
-      const url = `./assets/g1/meshes/g1/${file}`;
-      const res = await fetch(url);
-      if (!res.ok) {
-        console.warn(`Failed to fetch mesh ${file}`);
-        return;
+  if (missingMeshes.length > 0) {
+    throw new Error(`Missing MuJoCo mesh assets: ${missingMeshes.join(', ')}`);
+  }
+}
+
+function normalizeMuJoCoXml(text: string): string {
+  return text.replace(/\bmeshdir=(["']).*?\1/g, 'meshdir="meshes/g1"');
+}
+
+function mkdirp(mujoco: any, path: string) {
+  const parts = path.split('/').filter(Boolean);
+  let current = '';
+  for (const part of parts) {
+    current += `/${part}`;
+    try {
+      mujoco.FS.mkdir(current);
+    } catch (err: any) {
+      try {
+        mujoco.FS.stat(current);
+      } catch {
+        throw err;
       }
-      const buffer = await res.arrayBuffer();
-      mujoco.FS.writeFile(`${meshDir}/${file}`, new Uint8Array(buffer));
-    }),
-  );
+    }
+  }
+}
+
+function dirname(path: string): string {
+  const idx = path.lastIndexOf('/');
+  return idx <= 0 ? '/' : path.slice(0, idx);
+}
+
+function basename(path: string): string {
+  return path.split('/').filter(Boolean).pop() ?? path;
+}
+
+function findFirstBodyId(mujoco: any, model: any, names: string[]): number {
+  for (const name of names) {
+    const id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, name);
+    if (id >= 0) return id;
+  }
+  return -1;
+}
+
+function createPhpSensorQuaternion(): THREE.Quaternion {
+  const deg2rad = THREE.MathUtils.degToRad;
+  const xAxis = new THREE.Vector3(1, 0, 0);
+  const yAxis = new THREE.Vector3(0, 1, 0);
+  const zAxis = new THREE.Vector3(0, 0, 1);
+  const rpyDegToMjQuat = (rollDeg: number, pitchDeg: number, yawDeg: number) => {
+    const qx = new THREE.Quaternion().setFromAxisAngle(xAxis, deg2rad(rollDeg));
+    const qy = new THREE.Quaternion().setFromAxisAngle(yAxis, deg2rad(pitchDeg));
+    const qz = new THREE.Quaternion().setFromAxisAngle(zAxis, deg2rad(yawDeg));
+    return qz.multiply(qy).multiply(qx);
+  };
+  const mjQuatToThreeQuat = (qMj: THREE.Quaternion) =>
+    new THREE.Quaternion(-qMj.x, -qMj.z, qMj.y, -qMj.w);
+
+  const qOffsetMj = rpyDegToMjQuat(1, 27, 1);
+  const qBaseMj = rpyDegToMjQuat(0, 0, -90);
+  return mjQuatToThreeQuat(qOffsetMj.multiply(qBaseMj)).normalize();
 }
 
 async function init() {
@@ -143,11 +217,11 @@ async function init() {
 
   // Camera.
   const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 200);
-  camera.position.set(2.5, 1.8, 2.5);
+  camera.position.set(2.0, 1.7, 1.7);
 
   // Controls.
   const controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, 0.8, 0);
+  controls.target.set(0, 0.7, 0);
   controls.enableDamping = true;
   controls.dampingFactor = 0.05;
 
@@ -192,7 +266,7 @@ async function init() {
 
   // State.
   let motion: MotionClip | null = null;
-  let isPlaying = activeModelId === 'sonic';
+  let isPlaying = true;
   let playMode: PlayMode = 'kinematic';
   let playSpeed = 1.0;
   let currentTime = 0;
@@ -202,6 +276,8 @@ async function init() {
   let phpPolicy: any = null;
   let phpPolicyReady = false;
   let phpPolicyEnabled = activeModelId === 'php';
+  let phpAutoForwardEnabled = activeModelId === 'php';
+  let phpHighSpeedEnabled = true;
   let phpPolicyStepCounter = 0;
   let phpPolicyDecimation = 1;
 
@@ -222,22 +298,21 @@ async function init() {
       simTime = 0;
       phpPolicyStepCounter = 0;
       if (motion) {
-        const ref = sampleMotion(motion, 0);
-        setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
-        mujoco.mj_forward(mjScene.model, mjScene.data);
-        updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
+        applyMotionReference(0);
       } else {
         resetModelState(mjScene, mujoco, activeProfile);
         phpPolicy?.reset?.();
+        if (phpPolicy) {
+          phpPolicy.autoForward = phpAutoForwardEnabled;
+          phpPolicy.highSpeedMode = phpHighSpeedEnabled;
+          phpPolicy._updateCommandState?.();
+        }
       }
     },
     onModeChange: (mode) => {
       playMode = mode;
       if (motion) {
-        const ref = sampleMotion(motion, currentTime);
-        setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
-        mujoco.mj_forward(mjScene.model, mjScene.data);
-        updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
+        applyMotionReference(currentTime);
       }
     },
     onSpeedChange: (s) => (playSpeed = s),
@@ -246,24 +321,34 @@ async function init() {
       currentTime = 0;
       simTime = 0;
       updateMotionUI(motion);
+      applyMotionReference(0);
     },
     onKpChange: (kp) => (controllerOptions.kp = kp),
     onKdChange: (kd) => (controllerOptions.kd = kd),
+    onMaxTorqueChange: (maxTorque) => (controllerOptions.maxTorque = maxTorque),
     onPhpPolicyChange: (enabled) => (phpPolicyEnabled = enabled),
     onPhpAutoForwardChange: (enabled) => {
-      if (phpPolicy) phpPolicy.autoForward = enabled;
+      phpAutoForwardEnabled = enabled;
+      if (phpPolicy) {
+        phpPolicy.autoForward = enabled;
+        phpPolicy._updateCommandState?.();
+      }
     },
     onPhpHighSpeedChange: (enabled) => {
-      if (phpPolicy) phpPolicy.highSpeedMode = enabled;
+      phpHighSpeedEnabled = enabled;
+      if (phpPolicy) {
+        phpPolicy.highSpeedMode = enabled;
+        phpPolicy._updateCommandState?.();
+      }
+    },
+    onPhpCommand: (key, pressed) => {
+      phpPolicy?.setButtonPressed?.(key, pressed);
     },
     onSeek: (t) => {
       currentTime = t;
       simTime = t;
       if (motion) {
-        const ref = sampleMotion(motion, currentTime);
-        setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
-        mujoco.mj_forward(mjScene.model, mjScene.data);
-        updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
+        applyMotionReference(currentTime);
       }
     },
   });
@@ -272,11 +357,20 @@ async function init() {
   // Camera windows.
   const rgbWindow = new CameraWindow(ui.rgbContainer, false);
   const depthWindow = new CameraWindow(ui.depthContainer, true);
+  const phpMainCameraOffset = new THREE.Vector3(-4.0, 1.5, 0.0);
+  const phpSensorLocalPosition = new THREE.Vector3(0.01, 0.44, -0.01);
+  const phpSensorLocalQuaternion = createPhpSensorQuaternion();
+  const phpSensorAnchorBodyId = activeModelId === 'php'
+    ? findFirstBodyId(mujoco, mjScene.model, ['torso_link', 'torso', 'trunk', 'waist_roll_link', 'pelvis'])
+    : -1;
 
   if (activeProfile.policy) {
     ui.policyStatusEl!.textContent = 'Loading policy...';
     phpPolicy = new PolicyController(mujoco, activeProfile.policy);
     phpPolicy.init(mjScene.model).then(() => {
+      phpPolicy.autoForward = phpAutoForwardEnabled;
+      phpPolicy.highSpeedMode = phpHighSpeedEnabled;
+      phpPolicy._updateCommandState?.();
       phpPolicyReady = true;
       phpPolicyDecimation = Math.max(1, Math.round(activeProfile.policy!.controlDt / mjScene.model.opt.timestep));
       ui.policyStatusEl!.textContent = 'Policy ready';
@@ -304,13 +398,32 @@ async function init() {
     loadMotionFromURL(activeProfile.defaultMotionUrl).then((m) => {
       motion = m;
       updateMotionUI(motion);
-      const ref = sampleMotion(motion, 0);
-      setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
-      mujoco.mj_forward(mjScene.model, mjScene.data);
-      updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
+      applyMotionReference(0);
     });
   } else {
     resetModelState(mjScene, mujoco, activeProfile);
+  }
+
+  function applyMotionReference(time: number) {
+    if (!motion) return;
+    const ref = sampleMotion(motion, time);
+    setStateKinematic(mjScene.model, mjScene.data, ref.qpos, ref.qvel);
+    clearControls(mjScene);
+    mujoco.mj_forward(mjScene.model, mjScene.data);
+    updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
+  }
+
+  function stabilizeRootToReference(time: number) {
+    if (!motion) return;
+    const ref = sampleMotion(motion, time);
+    const qposCount = Math.min(7, ref.qpos.length, mjScene.model.nq);
+    const qvelCount = Math.min(6, ref.qvel.length, mjScene.model.nv);
+    for (let i = 0; i < qposCount; i++) {
+      mjScene.data.qpos[i] = ref.qpos[i];
+    }
+    for (let i = 0; i < qvelCount; i++) {
+      mjScene.data.qvel[i] = ref.qvel[i];
+    }
   }
 
   function updateMotionUI(m: MotionClip) {
@@ -319,7 +432,25 @@ async function init() {
     ui.timeSlider.step = String(m.duration / 1000);
   }
 
-  function updateHeadCamera() {
+  function updateMainCamera() {
+    if (activeModelId !== 'php' || mjScene.pelvisBodyId < 0) return;
+    const pelvisTransform = getBodyWorldTransform(mjScene.model, mjScene.data, mjScene.pelvisBodyId);
+    camera.position.copy(pelvisTransform.position).add(phpMainCameraOffset);
+    controls.target.copy(pelvisTransform.position);
+  }
+
+  function updateCameraWindows() {
+    if (activeModelId === 'php' && phpSensorAnchorBodyId >= 0) {
+      const anchorTransform = getBodyWorldTransform(mjScene.model, mjScene.data, phpSensorAnchorBodyId);
+      const sensorPosition = phpSensorLocalPosition.clone()
+        .applyQuaternion(anchorTransform.quaternion)
+        .add(anchorTransform.position);
+      const sensorQuaternion = anchorTransform.quaternion.clone().multiply(phpSensorLocalQuaternion);
+      rgbWindow.updatePose(sensorPosition, sensorQuaternion);
+      depthWindow.updatePose(sensorPosition, sensorQuaternion);
+      return;
+    }
+
     const headTransform = getBodyWorldTransform(mjScene.model, mjScene.data, mjScene.headBodyId);
     rgbWindow.updateCamera(headTransform.position, headTransform.quaternion);
     depthWindow.updateCamera(headTransform.position, headTransform.quaternion);
@@ -339,7 +470,7 @@ async function init() {
         currentTime += dt * playSpeed;
         if (currentTime > motion.duration) currentTime = 0;
         const ref = sampleMotion(motion, currentTime);
-        setStateKinematic(mjScene.model, mjScene.data, ref.qpos);
+        setStateKinematic(mjScene.model, mjScene.data, ref.qpos, ref.qvel);
         mujoco.mj_forward(mjScene.model, mjScene.data);
       } else {
         // Sonic: track the motion reference through the physics model.
@@ -348,8 +479,11 @@ async function init() {
         let steps = 0;
         while (simTime < targetSimTime && steps < 20) {
           const ref = sampleMotion(motion, simTime);
+          stabilizeRootToReference(simTime);
           applyPDControl(mujoco, mjScene.model, mjScene.data, ref.qpos, ref.qvel, controllerOptions);
           mujoco.mj_step(mjScene.model, mjScene.data);
+          stabilizeRootToReference(simTime + step);
+          mujoco.mj_forward(mjScene.model, mjScene.data);
           simTime += step;
           steps++;
         }
@@ -357,6 +491,7 @@ async function init() {
         if (currentTime > motion.duration) {
           currentTime = 0;
           simTime = 0;
+          applyMotionReference(0);
         }
       }
 
@@ -385,7 +520,8 @@ async function init() {
     }
 
     updateSceneTransforms(mjScene.model, mjScene.data, mjScene.bodies);
-    updateHeadCamera();
+    updateMainCamera();
+    updateCameraWindows();
 
     // Update plots every ~100ms.
     plotAccumulator += dt;
@@ -404,6 +540,13 @@ async function init() {
     }
 
     controls.update();
+
+    if (activeModelId === 'php' && phpPolicy) {
+      const depthCapture = depthWindow.captureDepth(scene);
+      if (depthCapture) {
+        phpPolicy.setDepthImage(depthCapture.data, depthCapture.width, depthCapture.height);
+      }
+    }
 
     renderer.render(scene, camera);
     rgbWindow.render(scene);
@@ -430,9 +573,11 @@ interface UIControls {
   onFile: (file: File) => void;
   onKpChange: (kp: number) => void;
   onKdChange: (kd: number) => void;
+  onMaxTorqueChange: (maxTorque: number) => void;
   onPhpPolicyChange: (enabled: boolean) => void;
   onPhpAutoForwardChange: (enabled: boolean) => void;
   onPhpHighSpeedChange: (enabled: boolean) => void;
+  onPhpCommand: (key: string, pressed: boolean) => void;
   onSeek: (time: number) => void;
 }
 
@@ -575,7 +720,8 @@ function buildUI(c: UIControls) {
   `;
   const kpRow = createNumberRow('Kp', DEFAULT_CONTROLLER_OPTIONS.kp, 0, 400, 10, c.onKpChange);
   const kdRow = createNumberRow('Kd', DEFAULT_CONTROLLER_OPTIONS.kd, 0, 40, 1, c.onKdChange);
-  optionsPanel.append(kpRow, kdRow);
+  const maxTorqueRow = createNumberRow('Limit', DEFAULT_CONTROLLER_OPTIONS.maxTorque, 0, 500, 10, c.onMaxTorqueChange);
+  optionsPanel.append(kpRow, kdRow, maxTorqueRow);
 
   const phpOptionsPanel = document.createElement('div');
   phpOptionsPanel.className = 'glass-panel p-4 flex flex-col gap-3 min-w-[220px]';
@@ -584,9 +730,10 @@ function buildUI(c: UIControls) {
     <div class="text-xs text-slate-400" id="policy-status">Policy disabled</div>
   `;
   const policyRow = createCheckboxRow('Enabled', true, c.onPhpPolicyChange);
-  const autoForwardRow = createCheckboxRow('Auto forward', false, c.onPhpAutoForwardChange);
+  const autoForwardRow = createCheckboxRow('Auto forward', !isSonic, c.onPhpAutoForwardChange);
   const highSpeedRow = createCheckboxRow('High speed', true, c.onPhpHighSpeedChange);
-  phpOptionsPanel.append(policyRow, autoForwardRow, highSpeedRow);
+  const commandPad = createPhpCommandPad(c.onPhpCommand);
+  phpOptionsPanel.append(policyRow, autoForwardRow, highSpeedRow, commandPad);
 
   // Camera windows panel.
   const cameraPanel = document.createElement('div');
@@ -634,8 +781,18 @@ function resetModelState(scene: MuJoCoScene, mujoco: any, profile: ModelProfile)
       scene.data.qvel[6 + i] = 0;
     }
   }
+  clearControls(scene);
   mujoco.mj_forward(scene.model, scene.data);
   updateSceneTransforms(scene.model, scene.data, scene.bodies);
+}
+
+function clearControls(scene: MuJoCoScene) {
+  for (let i = 0; i < scene.model.nu; i++) {
+    scene.data.ctrl[i] = 0;
+  }
+  for (let i = 0; i < scene.model.nv; i++) {
+    scene.data.qfrc_applied[i] = 0;
+  }
 }
 
 function createNumberRow(
@@ -653,6 +810,53 @@ function createNumberRow(
   const input = row.querySelector('input')!;
   input.onchange = () => onChange(parseFloat(input.value));
   return row;
+}
+
+function createPhpCommandPad(onCommand: (key: string, pressed: boolean) => void) {
+  const pad = document.createElement('div');
+  pad.className = 'grid grid-cols-3 gap-2 pt-1';
+
+  const buttonSpecs = [
+    { key: 'q', label: 'Q' },
+    { key: 'w', label: 'W' },
+    { key: 'e', label: 'E' },
+    { key: 'a', label: 'A' },
+    { key: '', label: '' },
+    { key: 'd', label: 'D' },
+  ];
+
+  for (const spec of buttonSpecs) {
+    if (!spec.key) {
+      const spacer = document.createElement('div');
+      pad.append(spacer);
+      continue;
+    }
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'glass-button px-0 py-2 select-none';
+    button.textContent = spec.label;
+    button.style.touchAction = 'none';
+    const setPressed = (pressed: boolean) => {
+      button.classList.toggle('active', pressed);
+      onCommand(spec.key, pressed);
+    };
+    button.onpointerdown = (event) => {
+      button.setPointerCapture(event.pointerId);
+      setPressed(true);
+      event.preventDefault();
+    };
+    button.onpointerup = (event) => {
+      setPressed(false);
+      button.releasePointerCapture(event.pointerId);
+      event.preventDefault();
+    };
+    button.onpointercancel = () => setPressed(false);
+    button.onpointerleave = () => setPressed(false);
+    pad.append(button);
+  }
+
+  return pad;
 }
 
 function createCheckboxRow(
