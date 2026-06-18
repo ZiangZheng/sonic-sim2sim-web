@@ -458,7 +458,7 @@ async function init() {
 
   let plotAccumulator = 0;
 
-  function animate() {
+  async function animate() {
     requestAnimationFrame(animate);
 
     const now = performance.now();
@@ -506,7 +506,7 @@ async function init() {
           if (!phpPolicyReady || !phpPolicyEnabled) break;
           if (phpPolicyStepCounter % phpPolicyDecimation === 0) {
             phpPolicy._updateCommandState?.();
-            void phpPolicy.requestAction(mjScene.model, mjScene.data).catch((err: unknown) => {
+            await phpPolicy.requestAction(mjScene.model, mjScene.data).catch((err: unknown) => {
               console.error('PHP policy inference error:', err);
             });
           }
